@@ -60,37 +60,11 @@ async def _get_video_duration(file_path: str) -> float:
     return 0.0
 
 
-async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> bool:
-    """
-    Extract a single JPEG frame from `file_path` at position `seek_secs`.
-
-    Strategy:
-    - Pre-input fast seek to near the target (avoids decoding gigabytes).
-    - Post-input fine seek of up to 2 s for an accurate, non-blank frame.
-    - FFmpeg's `thumbnail` filter picks the most visually representative
-      frame from a 100-frame window — far less likely to be black/blank.
-    - `scale=320:trunc(320/dar/2)*2` keeps even pixel dimensions (required
-      by most JPEG encoders) and avoids the "height not divisible by 2" crash.
-
-    Returns True if a non-empty file was written.
-    """
-    # Clamp seek to avoid requesting a frame past the end of the video
-    pre_seek = max(0.0, seek_secs - 2.0)   # fast pre-seek 2 s before target
-    post_seek = min(seek_secs, 2.0)         # fine post-seek (max 2 s)
-
+async def _run_ffmpeg_thumb(args: list, out_path: str) -> bool:
+    """Run an ffmpeg command and return True if a valid JPEG was produced."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-ss", str(pre_seek),           # fast seek BEFORE input
-            "-i", file_path,
-            "-ss", str(post_seek),          # accurate fine-seek AFTER input
-            "-map", "0:v:0",                # always grab the first video stream
-            "-vframes", "1",
-            # thumbnail filter: scan up to 300 frames and pick the best one;
-            # scale to 320-wide with even height; strip any attached pic streams
-            "-vf", "thumbnail=300,scale=320:trunc(ow/a/2)*2",
-            "-q:v", "2",                    # high-quality JPEG
-            out_path,
+            *args,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -98,6 +72,78 @@ async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> boo
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
     except Exception:
         return False
+
+
+async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> bool:
+    """
+    Extract a single JPEG frame from `file_path` at position `seek_secs`.
+
+    Tries 3 strategies in order, returning True on the first success:
+
+    1. thumbnail filter (best quality — picks most representative frame
+       from a 50-frame window). May fail on H.265 / VP9 / AV1.
+    2. Direct frame grab without thumbnail filter (works on all codecs).
+    3. No -map, no filter — absolute bare minimum (last resort for
+       exotic containers / broken streams).
+
+    Pre-input fast-seek + post-input fine-seek on strategies 1 & 2
+    avoids decoding gigabytes while still landing on a real frame.
+    `scale=320:trunc(ow/a/2)*2` guarantees even pixel dimensions
+    (required by JPEG encoder — odd height causes silent failures).
+    """
+    pre_seek = max(0.0, seek_secs - 2.0)
+    post_seek = min(seek_secs, 2.0)
+
+    # Clean any leftover file from a previous attempt
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    # ── Strategy 1: thumbnail filter (best, but codec-dependent) ─────────────
+    if await _run_ffmpeg_thumb([
+        "ffmpeg", "-y",
+        "-ss", str(pre_seek),
+        "-i", file_path,
+        "-ss", str(post_seek),
+        "-map", "0:v:0",
+        "-vframes", "1",
+        "-vf", "thumbnail=50,scale=320:trunc(ow/a/2)*2",
+        "-q:v", "2",
+        out_path,
+    ], out_path):
+        return True
+
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    # ── Strategy 2: direct frame grab (works on all codecs) ──────────────────
+    if await _run_ffmpeg_thumb([
+        "ffmpeg", "-y",
+        "-ss", str(pre_seek),
+        "-i", file_path,
+        "-ss", str(post_seek),
+        "-map", "0:v:0",
+        "-vframes", "1",
+        "-vf", "scale=320:trunc(ow/a/2)*2",
+        "-q:v", "2",
+        out_path,
+    ], out_path):
+        return True
+
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    # ── Strategy 3: bare minimum — no map, no filter ─────────────────────────
+    if await _run_ffmpeg_thumb([
+        "ffmpeg", "-y",
+        "-ss", str(seek_secs),
+        "-i", file_path,
+        "-vframes", "1",
+        "-q:v", "2",
+        out_path,
+    ], out_path):
+        return True
+
+    return False
 
 
 async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> str | None:
