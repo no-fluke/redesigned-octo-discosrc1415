@@ -20,6 +20,7 @@ import math
 from Rexbots.strings import HELP_TXT, COMMANDS_TXT
 from logger import LOGGER
 
+# ==================== NEW: FFMPEG THUMBNAIL FUNCTIONS ====================
 
 async def _get_video_duration(file_path: str) -> float:
     """
@@ -59,7 +60,6 @@ async def _get_video_duration(file_path: str) -> float:
         pass
     return 0.0
 
-
 async def _run_ffmpeg_thumb(args: list, out_path: str) -> bool:
     """Run an ffmpeg command and return True if a valid JPEG was produced."""
     try:
@@ -72,7 +72,6 @@ async def _run_ffmpeg_thumb(args: list, out_path: str) -> bool:
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
     except Exception:
         return False
-
 
 def is_blank_image(image_path: str, threshold: float = 10.0) -> bool:
     """
@@ -89,7 +88,6 @@ def is_blank_image(image_path: str, threshold: float = 10.0) -> bool:
         # Fallback: assume image is blank if file size is unusually small
         # (a true video frame usually > 5 KB)
         return os.path.getsize(image_path) < 5120
-
 
 def get_seek_candidates(duration: float) -> list[float]:
     """
@@ -126,7 +124,6 @@ def get_seek_candidates(duration: float) -> list[float]:
             seen.add(c)
             unique.append(c)
     return unique
-
 
 async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> bool:
     """
@@ -171,7 +168,6 @@ async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> boo
         return True
 
     return False
-
 
 async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> str | None:
     """
@@ -234,6 +230,7 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
 
     return None
 
+# ==================== END OF NEW FFMPEG FUNCTIONS ====================
 
 def humanbytes(size):
     if not size:
@@ -287,8 +284,6 @@ PROGRESS_BAR_DASHBOARD  = """\
 ››  <b>Elapsed</b> • <code>{elapsed}</code>
 </blockquote>
 """
-
-
 
 # -------------------
 # Download status
@@ -466,13 +461,7 @@ async def save(client: Client, message: Message):
         is_batch = "https://t.me/b/" in message.text
 
         # ─── PREMIUM CHECK ───────────────────────────────────────────────────
-        # Only restricted content requires login/premium. Public links are free.
         needs_restricted_access = is_private or is_batch
-        if not needs_restricted_access:
-            # For public channel links we might still fall back to restricted
-            # access if copy fails, so check premium now.
-            pass  # will be checked inside the loop on fallback
-
         if is_private or is_batch:
             import datetime
             expiry = await db.check_premium(message.from_user.id)
@@ -511,7 +500,7 @@ async def save(client: Client, message: Message):
                     api_hash=API_HASH,
                     api_id=API_ID,
                     in_memory=True,
-                    sleep_threshold=60  # auto-sleep on FloodWait up to 60s instead of crashing
+                    sleep_threshold=60
                 )
                 await acc.connect()
             except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan) as e:
@@ -577,7 +566,7 @@ async def save(client: Client, message: Message):
                                     api_hash=API_HASH,
                                     api_id=API_ID,
                                     in_memory=True,
-                                    sleep_threshold=60  # auto-sleep on FloodWait up to 60s
+                                    sleep_threshold=60
                                 )
                                 await acc.connect()
                             except Exception as conn_err:
@@ -629,7 +618,6 @@ async def save(client: Client, message: Message):
                     await wait_msg.delete()
 
         finally:
-            # ── Always disconnect the user client cleanly after the batch ──
             if acc is not None:
                 try:
                     await acc.disconnect()
@@ -655,8 +643,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             await client.send_message(message.chat.id, f"Session Token Invalid/Expired. Please /login again.\nError: {e}")
             return False
         except Exception as e:
-            # Handle PeerIdInvalid — use resolve_peer (lightweight) instead of
-            # get_dialogs(limit=None) which fetches ALL dialogs and triggers bans.
             logger.warning(f"Error fetching message: {e}. Trying resolve_peer...")
             try:
                 await acc.resolve_peer(chatid)
@@ -747,9 +733,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         smsg = await client.send_message(message.chat.id, '**__Downloading 🚀__**', reply_to_message_id=message.id)
         
-        # ----------------------------------------
-        # Create unique temp directory for this task
-        # ----------------------------------------
         temp_dir = f"downloads/{message.id}_{msgid}"
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
@@ -763,7 +746,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         download_success = False
         
         try:
-            # Download with a simpler file name to avoid path issues
             timestamp = int(time.time())
             temp_file_name = f"file_{timestamp}"
             file_path = await acc.download_media(
@@ -773,7 +755,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 progress_args=[message, "down"]
             )
             
-            # Check if file was downloaded successfully and has content
             if file_path and os.path.exists(file_path):
                 file_size = os.path.getsize(file_path)
                 if file_size > 0:
@@ -781,7 +762,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                     logger.info(f"File downloaded successfully: {file_path}, Size: {humanbytes(file_size)}")
                 else:
                     logger.warning(f"Downloaded file is empty (0 bytes): {file_path}")
-                    # Delete empty file
                     if os.path.exists(file_path):
                         os.remove(file_path)
                     raise Exception("File size equals to 0 B")
@@ -792,7 +772,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 os.remove(f'{message.id}downstatus.txt')
                 
         except Exception as e:
-            # Check if cancelled (flag is True) or exception message contains "Cancelled"
             if batch_temp.IS_BATCH.get(message.from_user.id) or "Cancelled" in str(e):
                 if os.path.exists(f'{message.id}downstatus.txt'):
                     try:
@@ -800,7 +779,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                     except:
                         pass
                 
-                # Robust Cleanup: Delete the entire temp directory
                 if os.path.exists(temp_dir):
                     try:
                         shutil.rmtree(temp_dir)
@@ -812,14 +790,12 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 
             logger.error(f"Error downloading media (attempt {retry_count + 1}/{max_retries}): {e}")
             
-            # Cleanup on error
             if os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
                 except:
                     pass
                     
-            # Check if we should retry
             retry_count += 1
             if retry_count < max_retries:
                 await smsg.edit(f"⚠️ **Download failed. Retrying... ({retry_count}/{max_retries})**")
@@ -840,7 +816,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 continue
 
         if batch_temp.IS_BATCH.get(message.from_user.id):
-            # Cleanup if cancelled during gap
             if os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
@@ -856,7 +831,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         caption = msg.caption if msg.caption else None
         
         if batch_temp.IS_BATCH.get(message.from_user.id):
-             # Cleanup if cancelled during gap
             if os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
@@ -866,24 +840,16 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         upload_success = False
         try:
+            # ==================== NEW THUMBNAIL HANDLING ====================
             if "Document" == msg_type:
                 ph_path = await get_thumb(message.from_user.id, acc, "Document", msg, file_path)
-                
-                # Get original filename if available
                 file_name = None
                 if hasattr(msg.document, 'file_name') and msg.document.file_name:
-                    # Sanitize filename to remove problematic characters
                     file_name = sanitize_filename(msg.document.file_name)
-                
                 await client.send_document(
-                    chat, 
-                    file_path, 
-                    thumb=ph_path, 
-                    caption=caption, 
-                    reply_to_message_id=message.id,
-                    file_name=file_name,  # Pass sanitized filename
-                    parse_mode=enums.ParseMode.HTML, 
-                    progress=progress,
+                    chat, file_path, thumb=ph_path, caption=caption,
+                    reply_to_message_id=message.id, file_name=file_name,
+                    parse_mode=enums.ParseMode.HTML, progress=progress,
                     progress_args=[message, "up"]
                 )
                 upload_success = True
@@ -892,105 +858,67 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
             elif "Video" == msg_type:
                 ph_path = await get_thumb(message.from_user.id, acc, "Video", msg, file_path)
-                
-                # Get original filename if available
                 file_name = None
                 if hasattr(msg.video, 'file_name') and msg.video.file_name:
                     file_name = sanitize_filename(msg.video.file_name)
-                
                 await client.send_video(
-                    chat, 
-                    file_path, 
-                    duration=msg.video.duration, 
-                    width=msg.video.width,
-                    height=msg.video.height, 
-                    thumb=ph_path, 
-                    caption=caption,
-                    reply_to_message_id=message.id, 
-                    file_name=file_name,  # Pass sanitized filename
-                    parse_mode=enums.ParseMode.HTML,
-                    progress=progress, 
+                    chat, file_path, duration=msg.video.duration, width=msg.video.width,
+                    height=msg.video.height, thumb=ph_path, caption=caption,
+                    reply_to_message_id=message.id, file_name=file_name,
+                    parse_mode=enums.ParseMode.HTML, progress=progress,
                     progress_args=[message, "up"]
                 )
                 upload_success = True
                 if ph_path and os.path.exists(ph_path):
                     os.remove(ph_path)
 
-            elif "Animation" == msg_type:
-                await client.send_animation(
-                    chat, 
-                    file_path, 
-                    reply_to_message_id=message.id, 
-                    parse_mode=enums.ParseMode.HTML
-                )
-                upload_success = True
-
-            elif "Sticker" == msg_type:
-                await client.send_sticker(
-                    chat, 
-                    file_path, 
-                    reply_to_message_id=message.id, 
-                    parse_mode=enums.ParseMode.HTML
-                )
-                upload_success = True
-
-            elif "Voice" == msg_type:
-                await client.send_voice(
-                    chat, 
-                    file_path, 
-                    caption=caption, 
-                    caption_entities=msg.caption_entities,
-                    reply_to_message_id=message.id, 
-                    parse_mode=enums.ParseMode.HTML,
-                    progress=progress, 
-                    progress_args=[message, "up"]
-                )
-                upload_success = True
-
             elif "Audio" == msg_type:
                 ph_path = await get_thumb(message.from_user.id, acc, "Audio", msg, file_path)
-                
-                # Get original filename if available
                 file_name = None
                 if hasattr(msg.audio, 'file_name') and msg.audio.file_name:
                     file_name = sanitize_filename(msg.audio.file_name)
                     if not file_name.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')):
                         file_name = f"{file_name}.mp3"
-                
                 await client.send_audio(
-                    chat, 
-                    file_path, 
-                    thumb=ph_path, 
-                    caption=caption, 
-                    reply_to_message_id=message.id,
-                    file_name=file_name,  # Pass sanitized filename
-                    parse_mode=enums.ParseMode.HTML, 
-                    progress=progress,
+                    chat, file_path, thumb=ph_path, caption=caption,
+                    reply_to_message_id=message.id, file_name=file_name,
+                    parse_mode=enums.ParseMode.HTML, progress=progress,
                     progress_args=[message, "up"]
                 )
                 upload_success = True
                 if ph_path and os.path.exists(ph_path):
                     os.remove(ph_path)
 
+            # ==================== END OF NEW THUMBNAIL HANDLING ====================
+
+            elif "Animation" == msg_type:
+                await client.send_animation(chat, file_path, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                upload_success = True
+
+            elif "Sticker" == msg_type:
+                await client.send_sticker(chat, file_path, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                upload_success = True
+
+            elif "Voice" == msg_type:
+                await client.send_voice(
+                    chat, file_path, caption=caption, caption_entities=msg.caption_entities,
+                    reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
+                    progress=progress, progress_args=[message, "up"]
+                )
+                upload_success = True
+
             elif "Photo" == msg_type:
-                # Telegram rejects photos without a recognised image extension.
-                # Pyrogram may omit the extension when a generic file_name is given,
-                # so rename to .jpg if needed before uploading.
                 if not file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):
                     new_photo_path = file_path + '.jpg'
                     os.rename(file_path, new_photo_path)
                     file_path = new_photo_path
                 await client.send_photo(
-                    chat, 
-                    file_path, 
-                    caption=caption, 
-                    reply_to_message_id=message.id,
+                    chat, file_path, caption=caption, reply_to_message_id=message.id,
                     parse_mode=enums.ParseMode.HTML
                 )
                 upload_success = True
                 
         except Exception as e:
-            # Check if cancelled (flag is True) or exception message contains "Cancelled"
             if batch_temp.IS_BATCH.get(message.from_user.id) or "Cancelled" in str(e):
                 if os.path.exists(f'{message.id}upstatus.txt'):
                     try:
@@ -998,7 +926,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                     except:
                         pass
                 
-                # Robust Cleanup: Delete the entire temp directory
                 if os.path.exists(temp_dir):
                     try:
                         shutil.rmtree(temp_dir)
@@ -1009,7 +936,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
             logger.error(f"Error sending media (attempt {retry_count + 1}/{max_retries}): {e}")
             
-            # Check if we should retry
             retry_count += 1
             if retry_count < max_retries:
                 await smsg.edit(f"⚠️ **Upload failed. Retrying... ({retry_count}/{max_retries})**")
@@ -1032,7 +958,6 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         if os.path.exists(f'{message.id}upstatus.txt'):
             os.remove(f'{message.id}upstatus.txt')
             
-        # Final cleanup of temp directory
         if os.path.exists(temp_dir):
             try:
                 shutil.rmtree(temp_dir)
@@ -1041,12 +966,10 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         await client.delete_messages(message.chat.id, [smsg.id])
         
-        # Update last upload time
         batch_temp.LAST_UPLOAD_TIME[message.from_user.id] = time.time()
         
         return upload_success
     
-    # If we reach here, all retries failed
     return False
 
 #-------------------
@@ -1105,15 +1028,10 @@ def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
 # -------------------
 
 def sanitize_filename(filename):
-    """Remove problematic characters from filename"""
     import re
-    # Remove invalid characters for file systems
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # Remove control characters
     filename = ''.join(char for char in filename if ord(char) >= 32)
-    # Remove leading/trailing spaces and dots
     filename = filename.strip('. ')
-    # Limit filename length
     if len(filename) > 200:
         name, ext = os.path.splitext(filename)
         filename = name[:200 - len(ext)] + ext
@@ -1128,7 +1046,6 @@ async def button_callbacks(client: Client, callback_query):
     data = callback_query.data
     message = callback_query.message
 
-    # Help button  
     if data == "help_btn":
         help_buttons = InlineKeyboardMarkup([
             [
@@ -1146,7 +1063,6 @@ async def button_callbacks(client: Client, callback_query):
         )
         await callback_query.answer()
 
-    # About button
     elif data == "about_btn":
         me = await client.get_me()
         about_text = (
@@ -1180,7 +1096,6 @@ async def button_callbacks(client: Client, callback_query):
         )
         await callback_query.answer()
 
-    # Home / Start button
     elif data == "start_btn":
         start_buttons = InlineKeyboardMarkup([
             [
@@ -1209,7 +1124,6 @@ async def button_callbacks(client: Client, callback_query):
         )
         await callback_query.answer()
 
-    # Settings button (Command List)
     elif data == "settings_btn":
         settings_buttons = InlineKeyboardMarkup([
             [
@@ -1227,11 +1141,9 @@ async def button_callbacks(client: Client, callback_query):
         )
         await callback_query.answer()
 
-    # Close button
     elif data == "close_btn":
         await client.delete_messages(message.chat.id, [message.id])
         await callback_query.answer()
-
 
 # Don't remove Credits
 # Rexbots
