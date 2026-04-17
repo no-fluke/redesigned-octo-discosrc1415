@@ -74,22 +74,66 @@ async def _run_ffmpeg_thumb(args: list, out_path: str) -> bool:
         return False
 
 
+def is_blank_image(image_path: str, threshold: float = 10.0) -> bool:
+    """
+    Returns True if the image is mostly black / blank.
+    Uses Pillow if available; otherwise falls back to file‑size heuristics.
+    """
+    try:
+        from PIL import Image, ImageStat
+        img = Image.open(image_path).convert('L')  # grayscale
+        stat = ImageStat.Stat(img)
+        mean_brightness = stat.mean[0]  # average pixel value 0–255
+        return mean_brightness < threshold
+    except ImportError:
+        # Fallback: assume image is blank if file size is unusually small
+        # (a true video frame usually > 5 KB)
+        return os.path.getsize(image_path) < 5120
+
+
+def get_seek_candidates(duration: float) -> list[float]:
+    """
+    Return a list of seek positions (seconds) ordered from best to worst.
+    This increases the chance of finding a non‑blank frame.
+    """
+    if duration <= 0:
+        return [0.0]
+
+    candidates = []
+    # 1. 33% – well past intros
+    candidates.append(duration * 0.33)
+    # 2. 10 seconds
+    if duration > 11:
+        candidates.append(10.0)
+    # 3. 25% and 50%
+    candidates.append(duration * 0.25)
+    candidates.append(duration * 0.5)
+    # 4. 1 second
+    if duration > 2:
+        candidates.append(1.0)
+    # 5. 75%
+    candidates.append(duration * 0.75)
+    # 6. Very first frame (last resort)
+    candidates.append(0.0)
+
+    # Remove duplicates and clamp to valid range
+    seen = set()
+    unique = []
+    for c in candidates:
+        c = max(0.0, min(c, duration - 0.5))
+        c = round(c, 2)
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
 async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> bool:
     """
     Extract a single JPEG frame from `file_path` at position `seek_secs`.
 
-    Tries 3 strategies in order, returning True on the first success:
-
-    1. thumbnail filter (best quality — picks most representative frame
-       from a 50-frame window). May fail on H.265 / VP9 / AV1.
-    2. Direct frame grab without thumbnail filter (works on all codecs).
-    3. No -map, no filter — absolute bare minimum (last resort for
-       exotic containers / broken streams).
-
-    Pre-input fast-seek + post-input fine-seek on strategies 1 & 2
-    avoids decoding gigabytes while still landing on a real frame.
-    `scale=320:trunc(ow/a/2)*2` guarantees even pixel dimensions
-    (required by JPEG encoder — odd height causes silent failures).
+    Uses a direct frame‑grab approach (no 'thumbnail' filter) for better
+    compatibility across all video codecs (H.264, H.265, VP9, AV1).
     """
     pre_seek = max(0.0, seek_secs - 2.0)
     post_seek = min(seek_secs, 2.0)
@@ -98,24 +142,7 @@ async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> boo
     if os.path.exists(out_path):
         os.remove(out_path)
 
-    # ── Strategy 1: thumbnail filter (best, but codec-dependent) ─────────────
-    if await _run_ffmpeg_thumb([
-        "ffmpeg", "-y",
-        "-ss", str(pre_seek),
-        "-i", file_path,
-        "-ss", str(post_seek),
-        "-map", "0:v:0",
-        "-vframes", "1",
-        "-vf", "thumbnail=50,scale=320:trunc(ow/a/2)*2",
-        "-q:v", "2",
-        out_path,
-    ], out_path):
-        return True
-
-    if os.path.exists(out_path):
-        os.remove(out_path)
-
-    # ── Strategy 2: direct frame grab (works on all codecs) ──────────────────
+    # Strategy 1: Direct frame grab with scaling to even dimensions
     if await _run_ffmpeg_thumb([
         "ffmpeg", "-y",
         "-ss", str(pre_seek),
@@ -132,7 +159,7 @@ async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> boo
     if os.path.exists(out_path):
         os.remove(out_path)
 
-    # ── Strategy 3: bare minimum — no map, no filter ─────────────────────────
+    # Strategy 2: Bare minimum – no map, no filter
     if await _run_ffmpeg_thumb([
         "ffmpeg", "-y",
         "-ss", str(seek_secs),
@@ -153,9 +180,7 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
        Falls through to FFmpeg if not set, expired, or download fails.
     2. For Video/Document: auto-extract a real frame using FFmpeg + ffprobe.
        - ffprobe detects the actual duration so we never seek past the end.
-       - Seek targets: 33 % → 10 s → 1 s → first frame (0 s).
-       - FFmpeg's `thumbnail` filter picks the most representative frame
-         from a 300-frame window, avoiding black/blank/intro frames.
+       - Multiple seek candidates are tried until a non‑blank frame is found.
     3. None → no thumbnail.
 
     The returned path is always a local .jpg file that the caller must
@@ -165,7 +190,6 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
     from pyrogram.errors import FileReferenceExpired as _FRE
 
     # ── 1. Custom thumbnail from DB ──────────────────────────────────────────
-    # FILE_REFERENCE_EXPIRED is common for old file_ids — retry once.
     custom_file_id = await db.get_thumbnail(user_id)
     if custom_file_id:
         for _attempt in range(2):
@@ -194,23 +218,19 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
         # Detect actual duration so we never seek past the end of the video.
         duration = await _get_video_duration(file_path)
 
-        # Build a list of candidate seek positions (seconds), best → worst.
-        # 33 % into the video is usually well past any intro/black frames.
-        candidates: list[float] = []
-        if duration > 3:
-            candidates.append(duration * 0.33)   # 33 % through the video
-        if duration > 11:
-            candidates.append(10.0)              # 10 s mark
-        if duration > 2:
-            candidates.append(1.0)               # 1 s mark
-        candidates.append(0.0)                   # absolute first frame (last resort)
-
-        for seek_secs in candidates:
+        # Try multiple seek positions until we get a non‑blank thumbnail
+        for seek_secs in get_seek_candidates(duration):
             if await _extract_frame(file_path, ffmpeg_out, seek_secs):
-                return ffmpeg_out
-            # Clean up a possible 0-byte/corrupt output before retrying
-            if os.path.exists(ffmpeg_out):
-                os.remove(ffmpeg_out)
+                # Check if the extracted frame is blank
+                if not is_blank_image(ffmpeg_out):
+                    return ffmpeg_out
+                # Blank frame → remove and try next candidate
+                if os.path.exists(ffmpeg_out):
+                    os.remove(ffmpeg_out)
+            else:
+                # Clean up any zero‑byte / corrupt output
+                if os.path.exists(ffmpeg_out):
+                    os.remove(ffmpeg_out)
 
     return None
 
@@ -399,14 +419,6 @@ async def send_start(client: Client, message: Message):
         reply_to_message_id=message.id,
         parse_mode=enums.ParseMode.HTML
     )
-
-    # try:
-    #     await message.react(
-    #         emoji=random.choice(REACTIONS),
-    #         big=True
-    #     )
-    # except Exception as e:
-    #     print(f"Reaction failed: {e}")
 
 # -------------------
 # Help command (standalone)
@@ -1225,7 +1237,3 @@ async def button_callbacks(client: Client, callback_query):
 # Rexbots
 # Developer Telegram @RexBots_Official
 # Update channel - @RexBots_Official
-
-# Rexbots
-# Don't Remove Credit
-# Telegram Channel @RexBots_Official
