@@ -21,13 +21,95 @@ from Rexbots.strings import HELP_TXT, COMMANDS_TXT
 from logger import LOGGER
 
 
+async def _get_video_duration(file_path: str) -> float:
+    """
+    Use ffprobe to get the exact duration (in seconds) of a video file.
+    Returns 0.0 if ffprobe fails or the file has no video stream.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        text = stdout.decode().strip()
+        if text and text != "N/A":
+            return float(text)
+        # Some containers store duration at the format level, not stream level
+        proc2 = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout2, _ = await proc2.communicate()
+        text2 = stdout2.decode().strip()
+        if text2 and text2 != "N/A":
+            return float(text2)
+    except Exception:
+        pass
+    return 0.0
+
+
+async def _extract_frame(file_path: str, out_path: str, seek_secs: float) -> bool:
+    """
+    Extract a single JPEG frame from `file_path` at position `seek_secs`.
+
+    Strategy:
+    - Pre-input fast seek to near the target (avoids decoding gigabytes).
+    - Post-input fine seek of up to 2 s for an accurate, non-blank frame.
+    - FFmpeg's `thumbnail` filter picks the most visually representative
+      frame from a 100-frame window — far less likely to be black/blank.
+    - `scale=320:trunc(320/dar/2)*2` keeps even pixel dimensions (required
+      by most JPEG encoders) and avoids the "height not divisible by 2" crash.
+
+    Returns True if a non-empty file was written.
+    """
+    # Clamp seek to avoid requesting a frame past the end of the video
+    pre_seek = max(0.0, seek_secs - 2.0)   # fast pre-seek 2 s before target
+    post_seek = min(seek_secs, 2.0)         # fine post-seek (max 2 s)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            "-ss", str(pre_seek),           # fast seek BEFORE input
+            "-i", file_path,
+            "-ss", str(post_seek),          # accurate fine-seek AFTER input
+            "-map", "0:v:0",                # always grab the first video stream
+            "-vframes", "1",
+            # thumbnail filter: scan up to 300 frames and pick the best one;
+            # scale to 320-wide with even height; strip any attached pic streams
+            "-vf", "thumbnail=300,scale=320:trunc(ow/a/2)*2",
+            "-q:v", "2",                    # high-quality JPEG
+            out_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+    except Exception:
+        return False
+
+
 async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> str | None:
     """
     Thumbnail resolution order:
     1. Custom thumbnail set by the user (stored in DB as Telegram file_id).
        Falls through to FFmpeg if not set, expired, or download fails.
-    2. For Video/Document: auto-extract a frame using FFmpeg.
-       Tries at 10s first; falls back to 1s for short videos.
+    2. For Video/Document: auto-extract a real frame using FFmpeg + ffprobe.
+       - ffprobe detects the actual duration so we never seek past the end.
+       - Seek targets: 33 % → 10 s → 1 s → first frame (0 s).
+       - FFmpeg's `thumbnail` filter picks the most representative frame
+         from a 300-frame window, avoiding black/blank/intro frames.
     3. None → no thumbnail.
 
     The returned path is always a local .jpg file that the caller must
@@ -37,10 +119,7 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
     from pyrogram.errors import FileReferenceExpired as _FRE
 
     # ── 1. Custom thumbnail from DB ──────────────────────────────────────────
-    # If the user has set a custom thumbnail, download it and return the path.
-    # FILE_REFERENCE_EXPIRED is common when the file_id was stored a long time
-    # ago — we retry once after a short pause so Telegram can reissue the ref.
-    # Any failure falls through silently to FFmpeg below.
+    # FILE_REFERENCE_EXPIRED is common for old file_ids — retry once.
     custom_file_id = await db.get_thumbnail(user_id)
     if custom_file_id:
         for _attempt in range(2):
@@ -51,48 +130,41 @@ async def get_thumb(user_id: int, acc, msg_type: str, msg, file_path: str) -> st
                 )
                 if dl_path and os.path.exists(dl_path) and os.path.getsize(dl_path) > 0:
                     return dl_path
-                # 0-byte download — clean up and fall through to FFmpeg
                 if dl_path and os.path.exists(dl_path):
                     os.remove(dl_path)
                 break
             except _FRE:
                 if _attempt == 0:
-                    await asyncio.sleep(3)  # let Telegram reissue the reference
+                    await asyncio.sleep(3)
                     continue
-                break   # second attempt also failed — fall through to FFmpeg
+                break
             except Exception:
-                break   # any other error — fall through to FFmpeg
+                break
 
     # ── 2. FFmpeg auto-thumbnail for Video / Document ────────────────────────
-    # Reached when: user has no custom thumb set, OR the download failed above.
-    #
-    # IMPORTANT: -ss is placed AFTER -i (post-input seek).
-    # Pre-input seek snaps to the nearest keyframe, which is almost always a
-    # blank/black frame at the start of a GOP — that is why thumbnails were blank.
-    # Post-input seek decodes every frame up to the timestamp, so the extracted
-    # frame is guaranteed to be a real, visible frame.
-    #
-    # Fallback chain: 10 s → 1 s → first frame (covers all video lengths).
     if msg_type in ("Video", "Document"):
         ffmpeg_out = f"thumbs/{user_id}_auto.jpg"
-        for seek in ("00:00:10", "00:00:01", "00:00:00"):
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y",
-                    "-i", file_path,    # open input FIRST
-                    "-ss", seek,        # seek AFTER input — decodes real frames
-                    "-vframes", "1",
-                    "-vf", "scale=320:-1",
-                    "-q:v", "2",        # high JPEG quality, no blocking/blank artifacts
-                    ffmpeg_out,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
-                if os.path.exists(ffmpeg_out) and os.path.getsize(ffmpeg_out) > 0:
-                    return ffmpeg_out
-            except Exception:
-                pass
+
+        # Detect actual duration so we never seek past the end of the video.
+        duration = await _get_video_duration(file_path)
+
+        # Build a list of candidate seek positions (seconds), best → worst.
+        # 33 % into the video is usually well past any intro/black frames.
+        candidates: list[float] = []
+        if duration > 3:
+            candidates.append(duration * 0.33)   # 33 % through the video
+        if duration > 11:
+            candidates.append(10.0)              # 10 s mark
+        if duration > 2:
+            candidates.append(1.0)               # 1 s mark
+        candidates.append(0.0)                   # absolute first frame (last resort)
+
+        for seek_secs in candidates:
+            if await _extract_frame(file_path, ffmpeg_out, seek_secs):
+                return ffmpeg_out
+            # Clean up a possible 0-byte/corrupt output before retrying
+            if os.path.exists(ffmpeg_out):
+                os.remove(ffmpeg_out)
 
     return None
 
