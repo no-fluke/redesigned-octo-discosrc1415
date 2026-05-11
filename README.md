@@ -35,7 +35,7 @@ An advanced Telegram bot by **RexBots** designed to save restricted content (Tex
 
 Click the button below, fill in your environment variables, and the bot deploys itself automatically.
 
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/YOUR_USERNAME/YOUR_REPO_NAME)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/no-fluke/redesigned-octo-discosrc1415)
 
 > ⚠️ **Replace** `YOUR_USERNAME/YOUR_REPO_NAME` in the button link above with your actual GitHub repo before pushing.
 
