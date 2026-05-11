@@ -1,8 +1,7 @@
 build:
   docker:
     web: Dockerfile
+    worker: Dockerfile   # same Dockerfile, or separate ones
 run:
-  web: python3 bot.py
-
-  # for heroku deployment...add this bulidpack.  
-#  https://github.com/heroku/heroku-buildpack-activestorage-preview
+  web: python3 web_app.py
+  worker: python3 bot.py
