@@ -3,5 +3,5 @@ build:
     web: Dockerfile
     worker: Dockerfile   # same Dockerfile, or separate ones
 run:
-  web: python3 web_app.py
+  web: python3 app.py
   worker: python3 bot.py
