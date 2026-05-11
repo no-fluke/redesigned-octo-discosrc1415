@@ -30,6 +30,14 @@ An advanced Telegram bot by **RexBots** designed to save restricted content (Tex
 *   MongoDB Database
 *   Telegram API ID and Hash
 *   Bot Token
+  
+## 🚀 One-Click Deploy to Heroku
+
+Click the button below, fill in your environment variables, and the bot deploys itself automatically.
+
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/YOUR_USERNAME/YOUR_REPO_NAME)
+
+> ⚠️ **Replace** `YOUR_USERNAME/YOUR_REPO_NAME` in the button link above with your actual GitHub repo before pushing.
 
 ### Environment Variables
 
