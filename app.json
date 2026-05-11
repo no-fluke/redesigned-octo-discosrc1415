@@ -1,0 +1,57 @@
+{
+  "name": "RexBots Save Restricted Bot",
+  "description": "Advanced Telegram bot to save restricted content from private/public channels.",
+  "logo": "https://avatars.githubusercontent.com/u/194442566?v=4",
+  "keywords": ["telegram", "bot", "pyrogram", "python"],
+  "stack": "container",
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    },
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "API_ID": {
+      "description": "Your Telegram API ID from https://my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API Hash from https://my.telegram.org",
+      "required": true
+    },
+    "ADMINS": {
+      "description": "Comma-separated Telegram User IDs of admins (e.g. 12345678,87654321)",
+      "required": true
+    },
+    "DB_URI": {
+      "description": "Your MongoDB connection string (e.g. mongodb+srv://...)",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "MongoDB database name",
+      "value": "REXSaveRestricted",
+      "required": false
+    },
+    "LOG_CHANNEL": {
+      "description": "Telegram Channel ID for bot logs (e.g. -1001234567890)",
+      "required": true
+    },
+    "ERROR_MESSAGE": {
+      "description": "Send error messages to users? (True or False)",
+      "value": "True",
+      "required": false
+    },
+    "KEEP_ALIVE_URL": {
+      "description": "URL to ping every 100s to keep the bot alive (your Heroku app URL, optional)",
+      "required": false
+    }
+  }
+}
